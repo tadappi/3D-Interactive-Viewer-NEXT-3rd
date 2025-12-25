@@ -422,7 +422,53 @@
     trailByPinId.forEach(tr=> tr.stop());
   }
 
-  function makeGlowTexture(){
+  
+
+  // ★指定ID群の航跡を「出しっぱなし」で開始（ホバー不要）
+  function startTrailsForIds(ids, token){
+    if (!ids || !ids.length) return;
+
+    // いったん停止→再スタートで揃える
+    hideAllTrails();
+
+    ids.forEach((id, idx)=>{
+      const pin = pinById.get(id);
+      const tr  = trailByPinId.get(id);
+      if (!pin || !tr) return;
+
+      // 刺さって（落下完了）いるものだけ
+      const deployed = !!pin.userData?._deployed;
+      if (!deployed) return;
+
+      setTimeout(()=>{
+        if (token !== currentModeToken) return;
+        tr.start();
+      }, idx * TRAILS_START_STAGGER_MS);
+    });
+  }
+
+  // ★ピンが全て落下した後に航跡を自動表示する（回収・逆ボタンまで維持）
+  function scheduleAutoTrailsAfterDrops(ids){
+    if (trailAutoStartTimer){
+      clearTimeout(trailAutoStartTimer);
+      trailAutoStartTimer = null;
+    }
+    currentModeIds = Array.isArray(ids) ? ids.slice() : [];
+    const token = ++currentModeToken;
+
+    if (!currentModeIds.length) return;
+
+    // 最後のドロップが始まるまで：(N-1)*DROP_INTERVAL_MS
+    // ドロップ所要：DROP_MS
+    // 余裕：+140ms
+    const totalDelay = Math.max(0, (currentModeIds.length - 1) * DROP_INTERVAL_MS + DROP_MS + 140);
+
+    trailAutoStartTimer = setTimeout(()=>{
+      if (token !== currentModeToken) return;
+      startTrailsForIds(currentModeIds, token);
+    }, totalDelay);
+  }
+function makeGlowTexture(){
     const c = document.createElement('canvas');
     c.width = c.height = 256;
     const ctx = c.getContext('2d');
@@ -792,7 +838,13 @@ const geo = new THREE.TubeGeometry(curve, tubularSegments, radius, radialSegment
   const DROP_INTERVAL_MS = 500;
   let pendingDropTimers = [];
 
-  const STRETCH_UP   = 1.5;
+  
+  // ★モード表示中の「導線(光航跡)」は、ピンが全て落下した後に自動で出しっぱなしにする
+  const TRAILS_START_STAGGER_MS = 120; // 同時に鳴るSEがうるさくならないよう少しだけずらす
+  let trailAutoStartTimer = null;
+  let currentModeToken = 0;
+  let currentModeIds = [];
+const STRETCH_UP   = 1.5;
   const SQUASH_DOWN  = 0.55;
 
   function clearPendingDrops(){
@@ -923,7 +975,13 @@ const geo = new THREE.TubeGeometry(curve, tubularSegments, radius, radialSegment
     clearPendingDrops();
     const want = new Set(idList);
 
-    overlay.classList.remove('visible');
+    
+    // ★前回の自動航跡開始タイマーを停止
+    if (trailAutoStartTimer){
+      clearTimeout(trailAutoStartTimer);
+      trailAutoStartTimer = null;
+    }
+overlay.classList.remove('visible');
     overlayFrame.src = 'about:blank';
 
     // ★切替時は導線を消す
@@ -945,14 +1003,24 @@ const geo = new THREE.TubeGeometry(curve, tubularSegments, radius, radialSegment
       }, i * DROP_INTERVAL_MS);
       pendingDropTimers.push(timerId);
     });
-  }
+  
+    // ★全ピン落下後に、ホバー不要で導線(光航跡)を自動表示
+    scheduleAutoTrailsAfterDrops(idList);
+}
 
   function collectAllPins(){
     clearPendingDrops();
     overlay.classList.remove('visible');
     overlayFrame.src = 'about:blank';
 
-    // ★回収時は導線も消す
+    
+    // ★自動航跡開始タイマー停止（回収で完全に消える）
+    if (trailAutoStartTimer){
+      clearTimeout(trailAutoStartTimer);
+      trailAutoStartTimer = null;
+    }
+    currentModeToken++; // 走っている/予約中の航跡を無効化
+// ★回収時は導線も消す
     hideAllRoutes();
     hideAllTrails();
 
@@ -1069,6 +1137,18 @@ const geo = new THREE.TubeGeometry(curve, tubularSegments, radius, radialSegment
       root.add(emitter.group);
       trailByPinId.set(pinId, emitter);
     }
+
+    // ---- ★まず1本：指定どおり（24,2,-43）→（-3,6,-50）
+    //   ここは後で折れ点を増やしたり、PINに合わせたり自由に調整OK
+    addTrailForPin('p11_rest', {
+      interval: 0.95,
+      linger: 2.2,
+      maxSimul: 3,
+      points: [
+        [24, 2, -43],
+        [-3, 6, -50],
+      ]
+    });
 
     // ---- p12（既定）: 0,10,0 → 18,10,-30 → ピンへ
     addTrailForPin('p12_kyoudo', {
@@ -1250,17 +1330,11 @@ const geo = new THREE.TubeGeometry(curve, tubularSegments, radius, radialSegment
 
     renderer.domElement.style.cursor = hoverObject ? 'pointer' : 'default';
 
-    // 導線PNGは廃止（残してても常に非表示）→ 光航跡だけ
+    // 導線PNGは（残してても）常に非表示のまま
     hideAllRoutes();
-    hideAllTrails();
 
-    if (hoverObject && hoverObject.userData?.type === 'pin'){
-      const id = hoverObject.userData.id;
-      const deployed = !!hoverObject.userData._deployed;
-      const trail = trailByPinId.get(id);
-      if (trail && deployed) trail.start();
-    }
-  }
+    // ★光航跡は「文系/理系」表示後に自動で出しっぱなしにする（ホバーでは触らない）
+}
 
   function activatePin(pin){
     if (_flying) return;
@@ -1380,19 +1454,12 @@ const geo = new THREE.TubeGeometry(curve, tubularSegments, radius, radialSegment
     if (hoverObject !== hit){
       setHoverPin(hit);
     }
-
-    // ★ホバー中はオートローテ停止＆航跡をループ再生（ホバーが「操作」扱いになる）
+    // ★ホバー中はオートローテ停止（導線はホバーに依存しない）
     if (hoverObject && hoverObject.userData?.type === 'pin'){
       controls.autoRotate = false;
       lastUserInputTime = now;
       idleReturnArmed = true;
-
-      const id = hoverObject.userData.id;
-      const deployed = !!hoverObject.userData._deployed; // 「刺さった後」だけ
-      const trail = trailByPinId.get(id);
-      if (trail && deployed && !trail.group.visible){
-        trail.start();
-      }
+    }
     }
 
     // ラベルの比率フィット
