@@ -1,0 +1,1473 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>20autorota — three.js viewer (sRGB + Shadow + GUI + Pins)</title>
+  <style>
+    html,body{height:100%;margin:0}
+    #app{position:fixed;inset:0;background:#c2c2c2}
+    canvas{display:block}
+    .hint{
+      position:fixed;left:10px;bottom:10px;color:#cfd8dc;
+      font:12px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+      opacity:.85;user-select:none;background:rgba(0,0,0,.35);
+      padding:6px 8px;border-radius:6px;
+      z-index: 5;
+    }
+
+    /* ===== オーバーレイ小ウィンドウ ===== */
+    #overlay {
+      position: fixed;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      width: min(50vw);
+      height: min(60vh);
+      background: #111;
+      border-radius: 10px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.6);
+      overflow: hidden;
+      display: none;
+      z-index: 10;
+    }
+    #overlay.visible { display: block; }
+    #overlay-header {
+      height: 28px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 8px;
+      background: rgba(20,20,20,0.95);
+      color: #eee;
+      font: 12px/1 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+      cursor: move;
+    }
+    #overlay-title {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: calc(100% - 40px);
+    }
+    #overlay-close {
+      border: none;
+      background: transparent;
+      color: #ccc;
+      cursor: pointer;
+      font-size: 14px;
+      padding: 0 4px;
+    }
+    #overlay-close:hover { color: #fff; }
+    #overlay-iframe {
+      width: 100%;
+      height: calc(100% - 28px);
+      border: none;
+      background: #000;
+    }
+
+    /* 上端中央のタイトル用 */
+    #top-title{
+      position: fixed;
+      top: 8px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 4;
+      pointer-events: none;
+    }
+    #top-title img{
+      display: block;
+      max-width: 90vw;
+      height: auto;
+    }
+
+    /* ===== 左上：文系/理系/回収 ボタン ===== */
+    #modeButtons{
+      position: fixed;
+      top: 14px;
+      left: 14px;
+      z-index: 20;
+      display: flex;
+      gap: 8px;
+    }
+    .mBtn{
+      width: 200px;
+      height: 50px;
+      border-radius: 10px;
+      border: 1px solid rgba(255,255,255,.25);
+      background: rgba(0,0,0,.55);
+      color: #fff;
+      font: 700 16px/1 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+      cursor: pointer;
+      box-shadow: 0 8px 20px rgba(0,0,0,.35);
+      backdrop-filter: blur(6px);
+    }
+    .mBtn:hover{ background: rgba(0,0,0,.68); }
+    .mBtn:active{ transform: translateY(1px); }
+    .mBtn.secondary{
+      width: 120px;
+      font-weight: 700;
+    }
+  </style>
+
+  <script type="importmap">
+  { "imports": {
+      "three": "https://unpkg.com/three@0.165.0/build/three.module.js"
+    } }
+  </script>
+</head>
+<body>
+  <div id="app"></div>
+
+  <div id="top-title">
+    <img src="./title.png" alt="藤原の里 3D ビューア">
+  </div>
+
+  <!-- 左上ボタン -->
+  <div id="modeButtons">
+    <button id="btnBunkei" class="mBtn">文系</button>
+    <button id="btnRikei"  class="mBtn">理系</button>
+    <button id="btnCollect" class="mBtn secondary">回収</button>
+  </div>
+
+  <!-- 小さめタブ（オーバーレイ） -->
+  <div id="overlay">
+    <div id="overlay-header">
+      <div id="overlay-title">Loading…</div>
+      <button id="overlay-close" aria-label="Close">✕</button>
+    </div>
+    <iframe id="overlay-iframe" src="about:blank" allowfullscreen></iframe>
+  </div>
+
+<script type="module">
+  import * as THREE from 'three';
+  import { OrbitControls } from 'https://unpkg.com/three@0.165.0/examples/jsm/controls/OrbitControls.js';
+  import { GLTFLoader } from 'https://unpkg.com/three@0.165.0/examples/jsm/loaders/GLTFLoader.js';
+  import GUI from 'https://cdn.jsdelivr.net/npm/lil-gui@0.19/+esm';
+
+  // ========================= 基本セットアップ =========================
+  const DEFAULT_BG = '#c2c2c2';
+  const container = document.getElementById('app');
+
+  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setSize(container.clientWidth, container.clientHeight);
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+  renderer.shadowMap.enabled = true;
+  container.appendChild(renderer.domElement);
+
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(DEFAULT_BG);
+
+  const camera = new THREE.PerspectiveCamera(50, container.clientWidth / container.clientHeight, 0.1, 5000);
+  camera.position.set(0, 40, 80);
+
+  const controls = new OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true;
+  controls.autoRotate = true;
+  controls.autoRotateSpeed = 0.5;
+  controls.target.set(0, 0, 0);
+
+  // ========================= 効果音（WebAudio） =========================
+  const audioListener = new THREE.AudioListener();
+  camera.add(audioListener);
+
+  const audioLoader = new THREE.AudioLoader();
+  let fallBuffer = null;
+  let stickBuffer = null;
+  let trailStartBuffer = null; // ★導線(光)の出発SE
+  audioLoader.load('./pin_fall.wav',  (buf)=>{ fallBuffer = buf; }, undefined, ()=>{});
+  audioLoader.load('./pin_stick.wav', (buf)=>{ stickBuffer = buf; }, undefined, ()=>{});
+
+  // ★導線(光)の出発SE（wavをindex.htmlと同じ階層に置く。ファイル名は変更OK）
+  audioLoader.load('./piyoon.wav', (buf)=>{ trailStartBuffer = buf; }, undefined, ()=>{});
+  function ensureAudioUnlocked(){
+    const ctx = audioListener.context;
+    if (ctx && ctx.state === 'suspended') ctx.resume();
+  }
+
+  function playOneShot(buffer, volume=0.35){
+    if (!buffer) return;
+    ensureAudioUnlocked();
+    const s = new THREE.Audio(audioListener);
+    s.setBuffer(buffer);
+    s.setVolume(volume);
+    s.play();
+  }
+
+  // 「軌道」用の基準ビュー
+  const baseOrbitPos = new THREE.Vector3();
+  const baseOrbitTarget = new THREE.Vector3();
+  let hasBaseOrbit = false;
+
+  // ピンクリック直前の「その時点の軌道上の位置」
+  const orbitPosBeforeFly = new THREE.Vector3();
+  const orbitTargetBeforeFly = new THREE.Vector3();
+  let hasOrbitBeforeFly = false;
+
+  // 無操作10秒で軌道に戻るためのタイマー
+  const IDLE_TIMEOUT_MS = 10000;
+  let lastUserInputTime = performance.now();
+  let idleReturnArmed = false;
+
+  function markUserInteraction(){
+    ensureAudioUnlocked();
+    lastUserInputTime = performance.now();
+    idleReturnArmed = true;
+  }
+
+  controls.addEventListener('start', markUserInteraction);
+  controls.addEventListener('end', markUserInteraction);
+
+  // ライティング
+  const ambient = new THREE.AmbientLight(0xffffff, 1.0);
+  scene.add(ambient);
+  const sun = new THREE.DirectionalLight(0xffffff, 1.2);
+  sun.position.set(3, 5, 2).multiplyScalar(100);
+  sun.castShadow = true;
+  sun.shadow.mapSize.set(2048, 2048);
+  sun.shadow.camera.near = 10;
+  sun.shadow.camera.far = 1000;
+  sun.shadow.camera.left = -300;
+  sun.shadow.camera.right = 300;
+  sun.shadow.camera.top = 300;
+  sun.shadow.camera.bottom = -300;
+  scene.add(sun);
+
+  const ground = new THREE.Mesh(
+    new THREE.PlaneGeometry(4000, 4000),
+    new THREE.ShadowMaterial({ opacity: 0.25 })
+  );
+  ground.rotation.x = -Math.PI / 2;
+  ground.position.y = -0.01;
+  ground.receiveShadow = true;
+  ground.visible = false;
+  scene.add(ground);
+
+  const axes = new THREE.AxesHelper(100);
+  scene.add(axes);
+  axes.visible = false;
+
+  // ========================= ★仮・方眼（XZグリッド） =========================
+  // 座標を手で入力するときの目盛り用。最終的にはGUIで非表示にできる。
+  let gridHelper = null;
+  let gridWanted = false;
+
+  function createXZGrid({ range=60, step=10, y=15, color=0x111111, opacity=0.25 } = {}){
+    const verts = [];
+    for (let x = -range; x <= range; x += step){
+      verts.push(x, y, -range,  x, y,  range); // Z方向の線
+    }
+    for (let z = -range; z <= range; z += step){
+      verts.push(-range, y, z,  range, y, z);  // X方向の線
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+    const mat = new THREE.LineBasicMaterial({ color, transparent:true, opacity });
+    const lines = new THREE.LineSegments(geo, mat);
+    lines.renderOrder = 2;
+    lines.visible = false;
+    lines.name = "XZGrid";
+    return lines;
+  }
+
+  // ========================= オーバーレイ要素 =========================
+  const overlay       = document.getElementById('overlay');
+  const overlayTitle  = document.getElementById('overlay-title');
+  const overlayFrame  = document.getElementById('overlay-iframe');
+  const overlayClose  = document.getElementById('overlay-close');
+
+  let overlayPrevAutoRotate = controls.autoRotate;
+
+  function toEmbedUrl(rawHref){
+    try{
+      const u = new URL(rawHref);
+      const host = u.hostname;
+      if (host.includes('youtu.be')) {
+        const id = u.pathname.replace('/', '');
+        if (id) return `https://www.youtube.com/embed/${id}?autoplay=1`;
+      }
+      if (host.includes('youtube.com') && u.searchParams.get('v')) {
+        const id = u.searchParams.get('v');
+        return `https://www.youtube.com/embed/${id}?autoplay=1`;
+      }
+    }catch(e){}
+    return rawHref;
+  }
+
+  function openOverlay(href){
+    if (!href) return;
+    markUserInteraction();
+    overlayPrevAutoRotate = controls.autoRotate;
+    controls.autoRotate = false;
+
+    const displayTitle = href.length > 60 ? href.slice(0, 57) + '…' : href;
+    overlayTitle.textContent = displayTitle;
+
+    const url = toEmbedUrl(href);
+    overlayFrame.src = url;
+    overlay.classList.add('visible');
+  }
+
+  overlayClose.addEventListener('click', ()=>{
+    markUserInteraction();
+    overlay.classList.remove('visible');
+    overlayFrame.src = 'about:blank';
+
+    let destPos = null;
+    let destTarget = null;
+    if (hasOrbitBeforeFly) {
+      destPos = orbitPosBeforeFly.clone();
+      destTarget = orbitTargetBeforeFly.clone();
+    } else if (hasBaseOrbit) {
+      destPos = baseOrbitPos.clone();
+      destTarget = baseOrbitTarget.clone();
+    }
+
+    hasOrbitBeforeFly = false;
+
+    if (destPos && destTarget) {
+      flyTo(camera, controls, destPos, destTarget, 1800, ()=>{
+        if (overlayPrevAutoRotate){
+          controls.autoRotate = true;
+          params.autoRotate = true;
+        }
+      });
+    } else {
+      if (overlayPrevAutoRotate){
+        controls.autoRotate = true;
+        params.autoRotate = true;
+      }
+    }
+  });
+
+  // ========================= Raycaster & 状態 =========================
+  const raycaster = new THREE.Raycaster();
+  const mouseNDC = new THREE.Vector2();
+
+  renderer.domElement.addEventListener('pointermove', (e)=>{
+    const r = renderer.domElement.getBoundingClientRect();
+    mouseNDC.x = ((e.clientX - r.left) / r.width) * 2 - 1;
+    mouseNDC.y = -((e.clientY - r.top) / r.height) * 2 + 1;
+  });
+
+  renderer.domElement.addEventListener('pointerdown', markUserInteraction);
+  renderer.domElement.addEventListener('wheel', markUserInteraction);
+  window.addEventListener('keydown', markUserInteraction);
+
+  let root = null;
+  const clickableObjects = [];
+  let hoverObject = null;
+
+  // ========================= タッチ端末：1タップ=ホバー相当 / 2タップ=リンク =========================
+  const isTouchDevice = ('maxTouchPoints' in navigator && navigator.maxTouchPoints > 0);
+  let touchHoverPin = null;        // タッチで「選択中」のピン（ホバー代用）
+  let touchLastTapTime = 0;        // ダブルタップ判定用
+  let suppressClickUntil = 0;      // タッチ後に発生する click を抑止
+
+  // ========================= テクスチャキャッシュ =========================
+  const texCache = new Map();
+  function loadTex(url){
+    if (!url) return null;
+    if (texCache.has(url)) return texCache.get(url);
+    const t = new THREE.TextureLoader().load(url);
+    texCache.set(url, t);
+    return t;
+  }
+
+  // ========================= ★導線PNG（ホバー時だけ表示） =========================
+  const routeByPinId = new Map();
+
+  function createRoutePlane({
+    png,
+    center=[0,0,0],
+    size=[80,28],
+    y=3.0,         // ★指定どおり：浮かせる
+    yawDeg=0,      // ★追加：Y軸周りの角度（度）
+    opacity=1.0
+  }){
+    const tex = loadTex(png);
+    const geo = new THREE.PlaneGeometry(size[0], size[1]);
+    const mat = new THREE.MeshBasicMaterial({
+      map: tex,
+      transparent: true,
+      opacity,
+      depthWrite: false,          // チラつき軽減
+      depthTest: true,
+      side: THREE.DoubleSide      // 裏から見ても消えない
+    });
+    const m = new THREE.Mesh(geo, mat);
+
+    // XZ平面に寝かす（上向き）
+    m.rotation.x = -Math.PI / 2;
+
+    // ★地面上で“ヨー”回転（これが欲しかったやつ）
+    m.rotation.y = THREE.MathUtils.degToRad(yawDeg);
+
+    m.position.set(center[0], y, center[2]);
+    m.visible = false;
+    m.renderOrder = 6;
+    return m;
+  }
+
+  function hideAllRoutes(){
+    routeByPinId.forEach(r=>{ r.visible = false; });
+  }
+
+
+  // ========================= ★光航跡（ホバー時だけ表示） =========================
+  // 目的：特定ピンのホバーで「走る光＋残光（半透明航跡）」を表示する
+  const trailByPinId = new Map();
+
+  function hideAllTrails(){
+    trailByPinId.forEach(tr=> tr.stop());
+  }
+
+  function makeGlowTexture(){
+    const c = document.createElement('canvas');
+    c.width = c.height = 256;
+    const ctx = c.getContext('2d');
+    const g = ctx.createRadialGradient(128,128,0,128,128,128);
+    g.addColorStop(0,'rgba(255,255,255,1)');
+    g.addColorStop(0.25,'rgba(255,230,160,0.90)');
+    g.addColorStop(0.55,'rgba(255,200,80,0.35)');
+    g.addColorStop(1,'rgba(255,200,80,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0,0,256,256);
+    const tex = new THREE.CanvasTexture(c);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    return tex;
+  }
+  const _glowTex = makeGlowTexture();
+
+  function _toVec3(p){
+    if (!p) return null;
+    if (p.isVector3) return p.clone();
+    if (Array.isArray(p) && p.length >= 3){
+      const x = Number(p[0]), y = Number(p[1]), z = Number(p[2]);
+      if (Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z)){
+        return new THREE.Vector3(x,y,z);
+      }
+    }
+    return null;
+  }
+
+  function createLightTrail({
+    start=[0,10,0],
+    end=[36,10,-12],
+    controls=[],        // 曲げ点：例 [[18,10,-30]]
+    radius=0.22,
+    tubularSegments=170,
+    radialSegments=6,
+    speed=0.9,          // 1.0 ≒ 1秒で全長を走る
+    tailLen=0.40,       // 航跡の長さ（0..1）
+    feather=0.06,       // 航跡フェードのなめらかさ
+    linger=0.95         // 終端到達後の残光（秒）
+  }){
+    const pts = [];
+    const s = _toVec3(start); if (s) pts.push(s);
+    (controls||[]).forEach(p=>{ const v=_toVec3(p); if (v) pts.push(v); });
+    const e = _toVec3(end); if (e) pts.push(e);
+
+    // 防御：点が足りない・壊れてる場合は「何もしない」オブジェクトを返す
+    if (pts.length < 2){
+      const group = new THREE.Group();
+      group.visible = false;
+      return { group, start(){}, stop(){}, update(){} };
+    }
+
+    const curve = new THREE.CurvePath();
+    for (let i=0; i<pts.length-1; i++){
+      // 折れ線：直線セグメントをつなぐ
+      curve.add(new THREE.LineCurve3(pts[i], pts[i+1]));
+    }
+    if (curve.updateArcLengths) curve.updateArcLengths();
+
+const geo = new THREE.TubeGeometry(curve, tubularSegments, radius, radialSegments, false);
+
+    const mat = new THREE.ShaderMaterial({
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      uniforms: {
+        uHead: { value: 0.0 },
+        uTail: { value: 0.0 },
+        uFeather: { value: feather },
+        uOpacity: { value: 1.0 }
+      },
+      vertexShader: `
+        varying float vT;
+        void main(){
+          vT = uv.y; // 0..1（曲線の始点→終点）
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        varying float vT;
+        uniform float uHead;
+        uniform float uTail;
+        uniform float uFeather;
+        uniform float uOpacity;
+
+        void main(){
+          float a1 = smoothstep(uTail, uTail + uFeather, vT);
+          float a2 = 1.0 - smoothstep(uHead, uHead + uFeather, vT);
+          float alpha = a1 * a2;
+
+          float headBoost = smoothstep(uHead - 0.07, uHead, vT);
+          vec3  col = mix(vec3(1.0,0.70,0.10), vec3(1.0,0.95,0.75), headBoost);
+
+          gl_FragColor = vec4(col, alpha * uOpacity);
+        }
+      `
+    });
+
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.renderOrder = 8;
+
+    const headMat = new THREE.SpriteMaterial({
+      map: _glowTex,
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      opacity: 1.0
+    });
+    const head = new THREE.Sprite(headMat);
+    head.scale.set(3.2, 3.2, 1);
+    head.renderOrder = 9;
+
+    const group = new THREE.Group();
+    group.add(mesh);
+    group.add(head);
+    group.visible = false;
+
+    const st = {
+      group, curve, head, mat,
+      speed, tailLen, linger,
+      _t0: 0,
+      _phase: 'run', // run | fade
+      start(){
+        this._t0 = performance.now();
+        this._phase = 'run';
+        this.mat.uniforms.uOpacity.value = 1.0;
+        this.head.material.opacity = 1.0;
+        this.group.visible = true;
+      },
+      stop(){
+        this.group.visible = false;
+      },
+      update(now){
+        if (!this.group.visible) return;
+
+        // now は performance.now()（ms）想定
+        const tsec = ((now - this._t0) / 1000) * this.speed;
+
+        if (this._phase === 'run'){
+          const headU = THREE.MathUtils.clamp(tsec, 0.0, 1.0);
+          const tailU = Math.max(0.0, headU - this.tailLen);
+
+          this.mat.uniforms.uHead.value = headU;
+          this.mat.uniforms.uTail.value = tailU;
+
+          // ★ここで落ちるのを防ぐ（headUが変でも死なない）
+          try{
+            this.head.position.copy(this.curve.getPointAt(headU));
+          }catch(_){
+            this.stop();
+            return;
+          }
+
+          if (tsec >= 1.0){
+            this._phase = 'fade';
+            this._t0 = now;
+            this.mat.uniforms.uHead.value = 1.0;
+            this.mat.uniforms.uTail.value = 0.0;
+          }
+          return;
+        }
+
+        // fade（半透明で残して消える）
+        const f = (now - this._t0) / (this.linger * 1000);
+        const k = Math.max(0.0, 1.0 - f);
+        this.mat.uniforms.uOpacity.value = 0.55 * k;
+        this.head.material.opacity = 0.9 * k;
+
+        if (k <= 0.0){
+          this.stop();
+        }
+      }
+    };
+    return st;
+  }
+
+
+  // ★航跡を「間隔で連射」するエミッタ（残光が残ってても次を出せる）
+  function createLightTrailEmitter({
+    interval = 0.95,   // 光の出発間隔（秒）
+    maxSimul = 3,      // 同時に残せる本数（2〜3推奨）
+    ...trailOpts       // createLightTrail に渡す
+  }){
+    const group = new THREE.Group();
+    group.visible = false;
+
+    const pool = [];
+    let enabled = false;
+    let lastSpawn = -1e18;
+
+    function spawn(now){
+      // 空きを探す
+      let tr = pool.find(t => !t.group.visible);
+
+      if (!tr){
+        if (pool.length < maxSimul){
+          tr = createLightTrail(trailOpts);
+          pool.push(tr);
+          group.add(tr.group);
+        } else {
+          // いっぱいなら最古を再利用
+          tr = pool.shift();
+          pool.push(tr);
+          tr.stop();
+        }
+      }
+
+      // 強制スタート（内部状態を初期化）
+      tr._t0 = now;
+      tr._phase = 'run';
+      tr.mat.uniforms.uOpacity.value = 1.0;
+      tr.head.material.opacity = 1.0;
+      tr.group.visible = true;
+
+      // ★出発の瞬間にSE
+      playOneShot(trailStartBuffer, 0.28);
+    }
+
+    return {
+      isEmitter: true,
+      group,
+      start(){
+        enabled = true;
+        group.visible = true;
+
+        // 触れた瞬間に1本出す
+        const now = performance.now();
+        lastSpawn = now - interval * 1000;
+        spawn(now);
+      },
+      stop(){
+        enabled = false;
+        group.visible = false;
+        pool.forEach(t => t.stop());
+      },
+      update(now){
+        if (enabled && (now - lastSpawn) >= interval * 1000){
+          lastSpawn = now;
+          spawn(now);
+        }
+        pool.forEach(t => t.update(now));
+      }
+    };
+  }
+
+
+
+  // ========================= カメラ飛行ユーティリティ =========================
+  let _flying = false;
+  function flyTo(camera, controls, destPos, destLook, duration = 1600, onDone){
+    if (_flying) return;
+    _flying = true;
+    const startPos  = camera.position.clone();
+    const startLook = controls.target.clone();
+    const easeInOutCubic = (t)=> t<0.5 ? 4*t*t*t : 1 - Math.pow(-2*t+2,3)/2;
+    const t0 = performance.now();
+
+    const prevEnabled = controls.enabled;
+    const prevAutoRotate = controls.autoRotate;
+    controls.enabled = false;
+    controls.autoRotate = false;
+
+    function step(now){
+      const t = Math.min(1, (now - t0) / duration);
+      const k = easeInOutCubic(t);
+      camera.position.lerpVectors(startPos, destPos, k);
+      controls.target.lerpVectors(startLook, destLook, k);
+      camera.lookAt(controls.target);
+      if (t < 1){
+        requestAnimationFrame(step);
+      } else {
+        controls.enabled = prevEnabled;
+        controls.autoRotate = prevAutoRotate;
+        _flying = false;
+        onDone && onDone();
+      }
+    }
+    requestAnimationFrame(step);
+  }
+
+  // ========================= ラベル付きスプライト生成（アスペクト保持） =========================
+  function attachLabelSprite(parent, texLabel, heightWorld = 4, offset=[0,2,0]){
+    if (!texLabel) return null;
+    const matLabel = new THREE.SpriteMaterial({ map: texLabel, transparent: true, depthTest: true });
+    const label = new THREE.Sprite(matLabel);
+    label.scale.set(heightWorld, heightWorld, 1);
+    label.position.set(...offset);
+    label.visible = true;
+    label.userData = { fitByImage: true, targetH: heightWorld };
+    parent.add(label);
+    return label;
+  }
+
+  // 共通ピン
+  function createPin({
+    id='pin',
+    pos=[0,0,0], href=null, iconBlue, iconRed, labelPng=null,
+    scale=3, labelHeight=4, labelOffset=[0,2,0], noColorSwap=false
+  }) {
+    const texBlue  = loadTex(iconBlue);
+    const texRed   = iconRed ? loadTex(iconRed) : texBlue;
+    const texLabel = labelPng ? loadTex(labelPng) : null;
+
+    const matBlue = new THREE.SpriteMaterial({ map: texBlue, transparent: true });
+    const matRed  = new THREE.SpriteMaterial({ map: texRed,  transparent: true });
+
+    const pin = new THREE.Sprite(matBlue);
+    pin.position.set(...pos);
+    pin.scale.setScalar(scale);
+    pin.renderOrder = 10;
+
+    pin.userData = {
+      id,
+      href,
+      type:'pin',
+      mats:{blue:matBlue, red:matRed},
+      label:null,
+      noColorSwap,
+      baseScale: scale,
+      _deployed: false   // ★追加：刺さった後だけ true
+    };
+
+    if (texLabel) {
+      const label = attachLabelSprite(pin, texLabel, labelHeight, labelOffset);
+      pin.userData.label = label;
+    }
+    return pin;
+  }
+
+  // 疑似回転ピン
+  function createSpinningPin({
+    id='spin',
+    pos=[0,0,0], href=null, icon='./pinbrightred.png',
+    baseScale=6, spinSpeed=0.8, minFactor=0.06, labelPng=null, labelHeight=5, labelOffset=[0,3.2,0]
+  }){
+    const tex = loadTex(icon);
+    const mat = new THREE.SpriteMaterial({ map: tex, transparent:true });
+    const sp = new THREE.Sprite(mat);
+    sp.position.set(...pos);
+    sp.scale.set(baseScale, baseScale, 1);
+    sp.renderOrder = 11;
+    sp.userData = {
+      id,
+      type:'pin',
+      href,
+      mats:{blue:mat, red:mat},
+      label:null,
+      noColorSwap:true,
+      baseScale: baseScale,
+      spin:{ base:baseScale, speed:spinSpeed, phase: Math.random()*Math.PI*2, min:minFactor }
+    };
+    if (labelPng){
+      const labelTex = loadTex(labelPng);
+      sp.userData.label = attachLabelSprite(sp, labelTex, labelHeight, labelOffset);
+    }
+    return sp;
+  }
+
+  // ========================= 「降って刺さる」ピン制御 =========================
+  const allPins = [];
+  const pinById = new Map();
+
+  const DROP_FROM_Y = 80;
+  const DROP_MS = 850;
+  const COLLECT_MS = 650;
+
+  const DROP_INTERVAL_MS = 500;
+  let pendingDropTimers = [];
+
+  const STRETCH_UP   = 1.5;
+  const SQUASH_DOWN  = 0.55;
+
+  function clearPendingDrops(){
+    if (!pendingDropTimers.length) return;
+    pendingDropTimers.forEach(id=> clearTimeout(id));
+    pendingDropTimers = [];
+  }
+
+  function registerPin(pin){
+    allPins.push(pin);
+    pinById.set(pin.userData.id, pin);
+
+    const home = pin.position.clone();
+    const raised = home.clone();
+    raised.y += DROP_FROM_Y;
+
+    pin.userData._homePos = home;
+    pin.userData._raisedPos = raised;
+
+    // 最初は回収状態
+    pin.position.copy(raised);
+    pin.visible = false;
+    if (pin.userData.label) pin.userData.label.visible = false;
+
+    pin.userData._anim = null;
+    pin.userData._deployed = false; // ★追加
+  }
+
+  function animatePinTo(pin, toVec3, ms, kind='move'){
+    const from = pin.position.clone();
+    pin.userData._anim = { from, to: toVec3.clone(), t0: performance.now(), dur: ms, kind, _stickPlayed:false };
+    pin.visible = true;
+    if (pin.userData.label) pin.userData.label.visible = true;
+
+    if (kind === 'drop') playOneShot(fallBuffer, 0.25);
+  }
+
+  function updatePinAnim(pin, now){
+    const a = pin.userData._anim;
+    if (!a) return;
+
+    const t = Math.min(1, (now - a.t0) / a.dur);
+
+    const easeOut = (x)=> 1 - Math.pow(1-x, 3);
+    const k = easeOut(t);
+
+    const x = THREE.MathUtils.lerp(a.from.x, a.to.x, k);
+    const z = THREE.MathUtils.lerp(a.from.z, a.to.z, k);
+    let   y = THREE.MathUtils.lerp(a.from.y, a.to.y, k);
+
+    let sx = 1.0;
+    let sy = 1.0;
+
+    if (a.kind === 'drop') {
+      if (t > 0.15 && t < 0.65){
+        const u = (t - 0.15) / 0.5;
+        const stretch = THREE.MathUtils.lerp(1.0, STRETCH_UP, Math.sin(u * Math.PI));
+        sy = stretch;
+        sx = 1 / Math.sqrt(stretch);
+      }
+
+      if (t > 0.78){
+        const u = (t - 0.78) / 0.22;
+
+        const squash = THREE.MathUtils.lerp(1.0, SQUASH_DOWN, Math.sin(u * Math.PI));
+        sy *= squash;
+        sx *= 1 / squash;
+
+        const damp = Math.exp(-8 * u);
+        const wobble = Math.sin(u * Math.PI * 5);
+        const amp = 1.2;
+        y += (-amp) * wobble * damp;
+
+        if (!a._stickPlayed && t > 0.92){
+          a._stickPlayed = true;
+          playOneShot(stickBuffer, 0.35);
+        }
+      }
+    }
+
+    pin.position.set(x, y, z);
+
+    const base = pin.userData.baseScale ?? 1;
+    pin.scale.set(base * sx, base * sy, 1);
+
+    if (t >= 1){
+      pin.userData._anim = null;
+
+      const isRaised = pin.position.distanceTo(pin.userData._raisedPos) < 1e-3;
+
+      // ★刺さった後だけ true（導線の出現条件）
+      pin.userData._deployed = !isRaised;
+
+      if (isRaised){
+        pin.visible = false;
+        if (pin.userData.label) pin.userData.label.visible = false;
+
+        const r = routeByPinId.get(pin.userData.id);
+        if (r) r.visible = false;
+      } else {
+        pin.position.copy(pin.userData._homePos);
+        const base = pin.userData.baseScale ?? 1;
+        pin.scale.set(base, base, 1);
+      }
+    }
+  }
+
+  // ========================= カメラから近い順に並べ替え =========================
+  function sortPinsByCameraDistance(ids){
+    const camPos = camera.position.clone();
+
+    return ids
+      .map(id => {
+        const pin = pinById.get(id);
+        if (!pin) return null;
+
+        const wp = new THREE.Vector3();
+        pin.getWorldPosition(wp);
+
+        return { id, dist: camPos.distanceTo(wp) };
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.dist - b.dist)
+      .map(o => o.id);
+  }
+
+  function showPinsByIds(idList){
+    clearPendingDrops();
+    const want = new Set(idList);
+
+    overlay.classList.remove('visible');
+    overlayFrame.src = 'about:blank';
+
+    // ★切替時は導線を消す
+    hideAllRoutes();
+    hideAllTrails();
+
+    allPins.forEach(pin=>{
+      const id = pin.userData.id;
+      if (!want.has(id)){
+        animatePinTo(pin, pin.userData._raisedPos, COLLECT_MS, 'collect');
+      }
+    });
+
+    idList.forEach((id, i)=>{
+      const pin = pinById.get(id);
+      if (!pin) return;
+      const timerId = setTimeout(()=>{
+        animatePinTo(pin, pin.userData._homePos, DROP_MS, 'drop');
+      }, i * DROP_INTERVAL_MS);
+      pendingDropTimers.push(timerId);
+    });
+  }
+
+  function collectAllPins(){
+    clearPendingDrops();
+    overlay.classList.remove('visible');
+    overlayFrame.src = 'about:blank';
+
+    // ★回収時は導線も消す
+    hideAllRoutes();
+    hideAllTrails();
+
+    allPins.forEach(pin=>{
+      animatePinTo(pin, pin.userData._raisedPos, COLLECT_MS, 'collect');
+    });
+  }
+
+  // ========================= モデル読込 =========================
+  const clickableSpinPins = [];
+  const gltfLoader = new GLTFLoader();
+
+  gltfLoader.load('./100.glb', (gltf) => {
+    root = gltf.scene;
+    root.traverse(o => { if (o.isMesh){ o.castShadow = true; o.receiveShadow = false; }});
+    scene.add(root);
+
+    // フィット
+    const box = new THREE.Box3().setFromObject(root);
+    const size = new THREE.Vector3(), center = new THREE.Vector3();
+    box.getSize(size); box.getCenter(center);
+    root.position.sub(center);
+
+    // ★方眼（XZ平面）を root 座標系に追加（ピン座標と同じ基準）
+    if (!gridHelper){
+      gridHelper = createXZGrid({ range:60, step:10, y:8, opacity:0.22 });
+      gridHelper.visible = gridWanted;
+      root.add(gridHelper);
+    }
+    const maxDim = Math.max(size.x, size.y, size.z);
+    const dist = maxDim * 1.6;
+    camera.position.set(dist*0.3, dist*0.2, dist*0.3);
+    controls.target.set(0,0,0);
+    controls.update();
+
+    // 基準軌道保存
+    baseOrbitPos.copy(camera.position);
+    baseOrbitTarget.copy(controls.target);
+    hasBaseOrbit = true;
+
+    // ===== 共通ピン 12個 =====
+    const PIN_DEFS = [
+      { id:'p1_event',      pos:[-14, 3, -20], href:'./eventarea.mp4',                         iconBlue:'./pin1blue.png', iconRed:'./pin1red.png', labelPng:'./seikyo.png' },
+      { id:'p2_konjiki',    pos:[-37,15, 41],  href:'./konjikido.mp4',                         iconBlue:'./pin1blue.png', iconRed:'./pin1red.png', labelPng:'./letters.png' },
+      { id:'p3_muryou',     pos:[-37, 3, 20],  href:'./muryou.mp4',                            iconBlue:'./pin1blue.png', iconRed:'./pin1red.png', labelPng:'./law.png' },
+      { id:'p4_yoshi',      pos:[  0,10, 22],  href:'./yoshitsune.mp4',                        iconBlue:'./pin1blue.png', iconRed:'./pin1red.png', labelPng:'./economics.png' },
+      { id:'p5_seichoS',    pos:[-17, 3,  7],  href:'https://tadappi.github.io/FU-seichoS/',   iconBlue:'./pin1blue.png', iconRed:'./pin1red.png', labelPng:'./agriculture.png' },
+      { id:'p6_machi',      pos:[-30, 3,  5],  href:'https://tadappi.github.io/FU-machi/',     iconBlue:'./pin1blue.png', iconRed:'./pin1red.png', labelPng:'./medicine.png' },
+      { id:'p7_jyosaku',    pos:[-14, 6, 55],  href:'https://tadappi.github.io/FU-jyosaku/',   iconBlue:'./pin1blue.png', iconRed:'./pin1red.png', labelPng:'./science.png' },
+      { id:'p8_ataka',      pos:[  0,12, 47],  href:'https://tadappi.github.io/FU-atakaseki/', iconBlue:'./pin1blue.png', iconRed:'./pin1red.png', labelPng:'./engineering.png' },
+      { id:'p9_kiyo',       pos:[ 22,12, 47],  href:'https://tadappi.github.io/FU-kiyohira/',  iconBlue:'./pin1blue.png', iconRed:'./pin1red.png', labelPng:'./liblary.png' },
+      { id:'p10_enmei',     pos:[  2, 3,-10],  href:'https://tadappi.github.io/FU-enmei/',     iconBlue:'./pin1blue.png', iconRed:'./pin1red.png', labelPng:'./pharmaceutical.png' },
+      { id:'p11_rest',      pos:[ -3, 6,-50],  href:'https://www.fujiwaranosato.com/restaurant/', iconBlue:'./pin1blue.png', iconRed:'./pin1red.png', labelPng:'./education.png' },
+      { id:'p12_kyoudo',    pos:[ 36, 9,-12],  href:'https://www.esashi-iwate.gr.jp/bunka/',   iconBlue:'./pin1blue.png', iconRed:'./pin1red.png', labelPng:'./gakushoku.png' },
+    ];
+
+    PIN_DEFS.forEach(d=>{
+      const pin = createPin({
+        id: d.id,
+        pos: d.pos,
+        href: d.href,
+        iconBlue: d.iconBlue,
+        iconRed: d.iconRed,
+        labelPng: d.labelPng,
+        scale: 3,
+        labelHeight: 0.7,
+        labelOffset: [0, 1.0, 0],
+      });
+      root.add(pin);
+      clickableObjects.push(pin);
+      registerPin(pin);
+    });
+
+
+    
+    // ========================= ★光航跡：各ピン（ホバー/1タップで走る＋残光） =========================
+    // 追加方法：
+    //   addTrailForPin('<pinId>', { points:[ [x,y,z], [x,y,z], ... , 'PIN' ] })
+    //   - points の途中点を増やすほど「折れ」が増える（結節点を増やす）。
+    //   - 最後に 'PIN' を入れると、そのピンの位置(x,z)に自動で合わせる（y は直前点の y を使う）。
+    function addTrailForPin(pinId, { points, interval=0.95, linger=2.2, maxSimul=3, radius=0.22, speed=0.9, tailLen=0.40, feather=0.06 }){
+      const pin = pinById.get(pinId);
+      if (!pin) return;
+
+      const resolved = points.map((p, i)=>{
+        if (p === 'PIN'){
+          const hp = pin.userData._homePos;
+          const prev = points[Math.max(0, i-1)];
+          const y = (Array.isArray(prev) && typeof prev[1] === 'number') ? prev[1] : 10;
+          return [hp.x, y, hp.z];
+        }
+        return p;
+      });
+
+      if (resolved.length < 2) return;
+
+      const start = resolved[0];
+      const end   = resolved[resolved.length-1];
+      const controls = resolved.slice(1, -1);
+
+      const emitter = createLightTrailEmitter({
+        interval,
+        maxSimul,
+        linger,
+        start,
+        controls,
+        end,
+        radius,
+        speed,
+        tailLen,
+        feather
+      });
+
+      root.add(emitter.group);
+      trailByPinId.set(pinId, emitter);
+    }
+
+    // ---- p12（既定）: 0,10,0 → 18,10,-30 → ピンへ
+    addTrailForPin('p12_kyoudo', {
+      interval: 0.95,
+      linger: 2.2,
+      maxSimul: 3,
+      points: [
+        [24,2,-43],
+        [25,3,-35],
+        [14,4,-11],
+        [25,10,-11],
+        'PIN'
+      ]
+    });
+
+    // ---- p1（例）: 0,10,0 → … → ピンへ（結節点は好きなだけ増やしてOK）
+    addTrailForPin('p1_event', {
+      interval: 0.95,
+      linger: 2.0,
+      maxSimul: 3,
+      points: [
+        [24,2,-43],
+        [-9,2,-24],
+        'PIN'
+      ]
+    });
+
+    // ---- p9（例）: 0,10,0 → … → ピンへ
+    addTrailForPin('p9_kiyo', {
+      interval: 0.95,
+      linger: 2.0,
+      maxSimul: 3,
+      points: [
+        [24,2,-43],
+        [-10,3,-24],
+        [-3,3,-10],
+        [-9,3,15],
+        [-20,3,13],
+        [-24,4,33],
+        [-12,6,54],
+        [-10,12,52],
+        [22,12,47],
+        
+      ]
+    });
+
+// ===== 疑似回転 赤ピン =====
+    const SPIN_PINS = [
+      { id:'s1_kiyohira3d', pos:[ 24, 5, -44], href:'https://tadappi.github.io/FUJIWARANOSATO-kiyohira/', labelPng:'./gate.png' },
+    ];
+
+    SPIN_PINS.forEach(d=>{
+      // ★疑似回転は廃止：静止した赤ピンとして常時表示（リンク等は保持）
+      const sp = createPin({
+        id: d.id,
+        pos: d.pos,
+        href: d.href,
+        iconBlue: './pinbrightred.png',
+        iconRed:  './pinbrightred.png',
+        labelPng: d.labelPng,
+        scale: 6,
+        labelHeight: 0.5,
+        labelOffset: [0, 1.0, 0],
+        noColorSwap: true
+      });
+
+      sp.userData._deployed = true; // 常時表示（刺さり済み扱い）
+      root.add(sp);
+      clickableObjects.push(sp);
+    });
+
+// ========================= 文系7・理系8（重複OK） =========================
+    const BUNKEI_IDS = [
+      'p1_event','p2_konjiki','p3_muryou','p4_yoshi','p9_kiyo','p11_rest','p12_kyoudo'
+    ];
+    const RIKEI_IDS = [
+      'p1_event','p5_seichoS','p6_machi','p7_jyosaku','p8_ataka','p9_kiyo','p10_enmei','p12_kyoudo'
+    ];
+
+    collectAllPins();
+
+    document.getElementById('btnBunkei').addEventListener('click', ()=>{
+      markUserInteraction();
+      showPinsByIds(sortPinsByCameraDistance(BUNKEI_IDS));
+    });
+    document.getElementById('btnRikei').addEventListener('click', ()=>{
+      markUserInteraction();
+      showPinsByIds(sortPinsByCameraDistance(RIKEI_IDS));
+    });
+    document.getElementById('btnCollect').addEventListener('click', ()=>{
+      markUserInteraction();
+      collectAllPins();
+    });
+
+  }, undefined, (err)=>{
+    console.error(err);
+    alert('GLBの読み込みに失敗しました。パス/ファイル名をご確認ください。');
+  });
+
+  // ========================= GUI =========================
+  const gui = new GUI({ title: 'Controls' });
+  const params = {
+    background: DEFAULT_BG,
+    ambientIntensity: ambient.intensity,
+    sunIntensity: sun.intensity,
+    sunElevDeg: 35,
+    sunAziDeg: 25,
+    autoRotate: controls.autoRotate,
+    rotateSpeed: controls.autoRotateSpeed,
+    showGroundShadow: ground.visible,
+    showAxes: false,
+    showGrid: false,
+    rotateX: 0, rotateY: 0, rotateZ: 0
+  };
+  gridWanted = params.showGrid;
+  if (gridHelper) gridHelper.visible = gridWanted;
+
+  const upSun = ()=>{
+    const elev = THREE.MathUtils.degToRad(params.sunElevDeg);
+    const azi  = THREE.MathUtils.degToRad(params.sunAziDeg);
+    const r = 100;
+    sun.position.set(
+      r*Math.cos(elev)*Math.cos(azi),
+      r*Math.sin(elev),
+      r*Math.cos(elev)*Math.sin(azi)
+    );
+  };
+  upSun();
+
+  gui.addColor(params, 'background').name('Background').onChange(v=> scene.background = new THREE.Color(v));
+  const fL = gui.addFolder('Lighting');
+  fL.add(params, 'ambientIntensity', 0, 2.5, 0.01).name('Ambient').onChange(v=> ambient.intensity = v);
+  fL.add(params, 'sunIntensity', 0, 3, 0.01).name('Sun').onChange(v=> sun.intensity = v);
+  fL.add(params, 'sunElevDeg', 0, 90, 1).name('Sun Elev [deg]').onChange(upSun);
+  fL.add(params, 'sunAziDeg', -180, 180, 1).name('Sun Azi [deg]').onChange(upSun);
+  fL.add(params, 'showGroundShadow').name('Ground shadow').onChange(v=> ground.visible = v);
+  const fM = gui.addFolder('Model Rotation');
+  fM.add(params, 'rotateX', -180, 180, 1).name('Rotate X [deg]');
+  fM.add(params, 'rotateY', -180, 180, 1).name('Rotate Y [deg]');
+  fM.add(params, 'rotateZ', -180, 180, 1).name('Rotate Z [deg]');
+  const fV = gui.addFolder('View');
+  fV.add(params, 'autoRotate').name('Auto rotate').onChange(v=> { controls.autoRotate = v; });
+  fV.add(params, 'rotateSpeed', -3, 3, 0.1).name('Rotate speed').onChange(v=> controls.autoRotateSpeed = v);
+  fV.add(params, 'showGrid').name('Show grid').onChange(v=> { gridWanted = v; if (gridHelper) gridHelper.visible = v; });
+  gui.add(params, 'showAxes').name('Show axes').onChange(v=> axes.visible = v);
+  gui.close();
+
+  // ========================= クリック（寄ってから小ウィンドウ＆軌道保存） =========================
+  const _p = new THREE.Vector3(), _box = new THREE.Box3(), _size = new THREE.Vector3();
+
+  // ========================= ピック＆操作（クリック／タッチ） =========================
+  function pickPinFromClientXY(clientX, clientY){
+    const r = renderer.domElement.getBoundingClientRect();
+    const x = ((clientX - r.left) / r.width) * 2 - 1;
+    const y = -((clientY - r.top) / r.height) * 2 + 1;
+
+    raycaster.setFromCamera({ x, y }, camera);
+    const hits = raycaster.intersectObjects(clickableObjects, true);
+    if (!hits.length) return null;
+
+    const obj = hits[0].object;
+    const hit = (obj.userData?.type) ? obj : (obj.parent?.userData?.type) ? obj.parent : obj;
+    if (!hit || hit.visible === false) return null;
+    return hit;
+  }
+
+  function setHoverPin(pin){
+    // 前のホバー解除
+    if (hoverObject && hoverObject.userData?.type === 'pin'){
+      if (!hoverObject.userData.noColorSwap) hoverObject.material = hoverObject.userData.mats.blue;
+    }
+
+    hoverObject = pin;
+
+    // 新しいホバー適用
+    if (hoverObject && hoverObject.userData?.type === 'pin'){
+      if (!hoverObject.userData.noColorSwap) hoverObject.material = hoverObject.userData.mats.red;
+    }
+
+    renderer.domElement.style.cursor = hoverObject ? 'pointer' : 'default';
+
+    // 導線PNGは廃止（残してても常に非表示）→ 光航跡だけ
+    hideAllRoutes();
+    hideAllTrails();
+
+    if (hoverObject && hoverObject.userData?.type === 'pin'){
+      const id = hoverObject.userData.id;
+      const deployed = !!hoverObject.userData._deployed;
+      const trail = trailByPinId.get(id);
+      if (trail && deployed) trail.start();
+    }
+  }
+
+  function activatePin(pin){
+    if (_flying) return;
+    if (!pin || !pin.userData) return;
+
+    const ud = pin.userData;
+    const href = ud.href;
+    if (!href) return;
+
+    // クリック／2タップで確定したらオートローテは止める（再開は無操作10秒）
+    controls.autoRotate = false;
+    lastUserInputTime = performance.now();
+    idleReturnArmed = true;
+
+    hideAllRoutes();
+    hideAllTrails();
+
+    const p = new THREE.Vector3();
+    pin.getWorldPosition(p);
+
+    const d0 = camera.position.distanceTo(p);
+    let desiredDist = THREE.MathUtils.clamp(d0 * 0.35, 10, 120);
+
+    const dirv = camera.position.clone().sub(p).normalize();
+    const autoCam = p.clone().add(dirv.multiplyScalar(desiredDist));
+
+    const destPos = (ud.camPos instanceof THREE.Vector3) ? ud.camPos.clone() : autoCam;
+    const lookAt  = (ud.lookAt instanceof THREE.Vector3) ? ud.lookAt.clone() : p.clone();
+    const duration = (typeof ud.flyMs === 'number') ? ud.flyMs : 1500;
+
+    flyTo(camera, controls, destPos, lookAt, duration, ()=>{
+      openOverlay(href);
+    });
+  }
+
+  // PC：クリックで即リンク（従来どおり）
+  renderer.domElement.addEventListener('click', (e)=>{
+    if (performance.now() < suppressClickUntil) return;
+
+    const pin = pickPinFromClientXY(e.clientX, e.clientY);
+    if (!pin) return;
+
+    // クリックは確定＝即実行
+    activatePin(pin);
+  });
+
+  // タブレット：1タップ=ホバー相当（選択） / 2タップ=リンクへ
+  renderer.domElement.addEventListener('pointerup', (e)=>{
+    if (e.pointerType !== 'touch') return;
+
+    // タッチ後に発生する click を抑止
+    suppressClickUntil = performance.now() + 600;
+
+    const now = performance.now();
+    const pin = pickPinFromClientXY(e.clientX, e.clientY);
+
+    // 空タップ：選択解除
+    if (!pin){
+      touchHoverPin = null;
+      touchLastTapTime = now;
+      setHoverPin(null);
+      markUserInteraction();
+      return;
+    }
+
+    // 1タップ：選択（ホバー相当）
+    if (touchHoverPin !== pin || (now - touchLastTapTime) > 650){
+      touchHoverPin = pin;
+      touchLastTapTime = now;
+      markUserInteraction();
+
+      // ホバー相当：赤くして航跡開始（ループはtick側で継続）
+      setHoverPin(pin);
+
+      // ホバー中はオートローテ停止
+      controls.autoRotate = false;
+      lastUserInputTime = now;
+      idleReturnArmed = true;
+      return;
+    }
+
+    // 2タップ：確定（リンクへ）
+    touchLastTapTime = now;
+    markUserInteraction();
+
+    // 選択固定は解除（飛行中にホバー固定だと邪魔になるので）
+    touchHoverPin = null;
+
+    setHoverPin(pin);
+    activatePin(pin);
+  }, { passive:false });
+
+
+  // ========================= ループ =========================
+  const clock = new THREE.Clock();
+
+  function tick(){
+    const t  = clock.elapsedTime;
+    const now = performance.now();
+
+    // レイキャスト（ホバー）
+    let hit = null;
+
+    // タッチで「選択中」のピンがあれば、それをホバー扱いに固定
+    if (touchHoverPin){
+      hit = touchHoverPin;
+    } else {
+      raycaster.setFromCamera(mouseNDC, camera);
+      const hits = raycaster.intersectObjects(clickableObjects, true);
+      if (hits.length){
+        const obj = hits[0].object;
+        hit = (obj.userData?.type) ? obj : (obj.parent?.userData?.type) ? obj.parent : obj;
+        if (hit && hit.visible === false) hit = null;
+      }
+    }
+
+    if (hoverObject !== hit){
+      setHoverPin(hit);
+    }
+
+    // ★ホバー中はオートローテ停止＆航跡をループ再生（ホバーが「操作」扱いになる）
+    if (hoverObject && hoverObject.userData?.type === 'pin'){
+      controls.autoRotate = false;
+      lastUserInputTime = now;
+      idleReturnArmed = true;
+
+      const id = hoverObject.userData.id;
+      const deployed = !!hoverObject.userData._deployed; // 「刺さった後」だけ
+      const trail = trailByPinId.get(id);
+      if (trail && deployed && !trail.group.visible){
+        trail.start();
+      }
+    }
+
+    // ラベルの比率フィット
+    clickableObjects.forEach(obj=>{
+      const lbl = obj.userData?.label;
+      if (!lbl || !lbl.userData?.fitByImage) return;
+      const img = lbl.material.map?.image;
+      if (img && img.width && img.height){
+        const h = lbl.userData.targetH;
+        const w = h * (img.width / img.height);
+        lbl.scale.set(w, h, 1);
+        lbl.userData.fitByImage = false;
+      }
+    });
+
+    // 「降って刺さる／回収」更新
+    allPins.forEach(pin=> updatePinAnim(pin, now));
+
+    // ★光航跡 更新
+    trailByPinId.forEach(tr => tr.update(now));
+
+    // モデル回転
+    if (root){
+      root.rotation.set(
+        THREE.MathUtils.degToRad(params.rotateX),
+        THREE.MathUtils.degToRad(params.rotateY),
+        THREE.MathUtils.degToRad(params.rotateZ)
+      );
+    }
+
+    // 無操作10秒で「距離＆高さは基準、方位は今のまま」でオートローテ再開
+    const overlayVisible = overlay.classList.contains('visible');
+    if (idleReturnArmed && !overlayVisible && !_flying && hasBaseOrbit && params.autoRotate){
+      if (now - lastUserInputTime > IDLE_TIMEOUT_MS){
+        idleReturnArmed = false;
+
+        const baseCenter = baseOrbitTarget.clone();
+        const baseVec    = baseOrbitPos.clone().sub(baseCenter);
+        const baseRadius = baseVec.length();
+        const baseY      = baseOrbitPos.y - baseCenter.y;
+
+        const curVec = camera.position.clone().sub(baseCenter);
+        const yaw    = Math.atan2(curVec.z, curVec.x);
+
+        const horizRadius = Math.max(
+          1e-3,
+          Math.sqrt(Math.max(0, baseRadius * baseRadius - baseY * baseY))
+        );
+
+        const destPos = new THREE.Vector3(
+          baseCenter.x + horizRadius * Math.cos(yaw),
+          baseCenter.y + baseY,
+          baseCenter.z + horizRadius * Math.sin(yaw)
+        );
+        const destTarget = baseCenter;
+
+        flyTo(camera, controls, destPos, destTarget, 2000, ()=>{
+          controls.autoRotate = true;
+          params.autoRotate = true;
+        });
+      }
+    }
+
+    controls.update();
+    renderer.render(scene, camera);
+    requestAnimationFrame(tick);
+  }
+  tick();
+
+  window.addEventListener('resize', ()=>{
+    const w = container.clientWidth, h = container.clientHeight;
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+    renderer.setSize(w, h);
+  });
+</script>
+</body>
+</html>
