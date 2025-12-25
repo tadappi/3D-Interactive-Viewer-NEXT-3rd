@@ -1506,6 +1506,8 @@ overlay.classList.remove('visible');
     // ★光航跡 更新
     trailByPinId.forEach(tr => tr.update(now));
 
+    modeTrailByKey.forEach(tr => tr.update(now));
+
     // モデル回転
     if (root){
       root.rotation.set(
